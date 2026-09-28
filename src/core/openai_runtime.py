@@ -8,6 +8,8 @@ Gemini Red Team dùng Google ADK trong agents/*.py — không đi qua file này.
 """
 from __future__ import annotations
 
+import asyncio
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -19,6 +21,22 @@ from core.config import (
     blue_client_kwargs,
     red_openai_client_kwargs,
 )
+
+
+def _retry_after_seconds(exc: Exception) -> float | None:
+    """Lấy thời gian chờ từ header ``Retry-After`` hoặc message của OpenRouter."""
+    headers = getattr(getattr(exc, "response", None), "headers", None)
+    if headers:
+        raw = headers.get("retry-after") or headers.get("Retry-After")
+        if raw:
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                pass
+    match = re.search(r"retry_after_seconds\D{0,4}(\d+)", str(exc))
+    if match:
+        return float(match.group(1))
+    return None
 
 
 @dataclass
@@ -45,6 +63,10 @@ class OpenAIRunner:
     client_kwargs: dict = field(default_factory=dict)
     input_hooks: list[Callable[[str], str | None]] = field(default_factory=list)
     output_hooks: list[Callable[[str], str]] = field(default_factory=list)
+    # 512 đủ cho câu trả lời banking; model Blue là reasoning model nên
+    # ngân sách token thấp sẽ khiến `content` rỗng.
+    max_tokens: int = 512
+    max_attempts: int = 5
 
     def _client(self):
         from openai import OpenAI
@@ -62,13 +84,12 @@ class OpenAIRunner:
             return block_msg
 
         client = self._client()
-        completion = client.chat.completions.create(
-            model=self.model,
-            messages=[
+        completion = await self._create_with_retry(
+            client,
+            [
                 {"role": "system", "content": agent.instruction},
                 {"role": "user", "content": user_message},
             ],
-            temperature=self.temperature,
         )
         text = (completion.choices[0].message.content or "").strip()
 
@@ -77,6 +98,45 @@ class OpenAIRunner:
 
         text = await self._run_output_plugins(text)
         return text
+
+    async def _create_with_retry(self, client, messages: list[dict]):
+        """Gọi chat completion, tự thử lại khi gặp 429 / lỗi mạng / 5xx.
+
+        Endpoint ``:free`` của OpenRouter nằm trong pool dùng chung nên thỉnh
+        thoảng trả 429 kèm ``Retry-After``. Không thử lại thì cả suite CP3
+        đổ giữa đường. Lỗi 4xx khác (sai key, sai model) được ném ra ngay.
+        """
+        from openai import APIConnectionError, APIStatusError, RateLimitError
+
+        last_error: Exception | None = None
+
+        for attempt in range(1, self.max_attempts + 1):
+            try:
+                return client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    temperature=self.temperature,
+                    max_tokens=self.max_tokens,
+                )
+            except (RateLimitError, APIConnectionError) as exc:
+                last_error = exc
+            except APIStatusError as exc:
+                if exc.status_code < 500:
+                    raise
+                last_error = exc
+
+            if attempt == self.max_attempts:
+                break
+
+            wait = _retry_after_seconds(last_error) or min(2.0**attempt, 30.0)
+            print(
+                f"  [retry {attempt}/{self.max_attempts - 1}] "
+                f"{type(last_error).__name__} — chờ {wait:.0f}s"
+            )
+            await asyncio.sleep(wait)
+
+        assert last_error is not None
+        raise last_error
 
     async def _run_input_plugins(self, user_message: str) -> str | None:
         if not self.plugins:

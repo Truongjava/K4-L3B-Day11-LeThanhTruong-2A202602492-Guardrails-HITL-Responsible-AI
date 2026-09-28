@@ -4,9 +4,12 @@ Lab 11 — Configuration, provider selection, API keys.
 Hai tầng model (không trộn):
 
   Blue Team (CP2–CP3, guardrails / pipeline / protected agent)
-    → CỐ ĐỊNH OpenRouter ``liquid/lfm-2.5-2.6b``
-       https://openrouter.ai/liquid/lfm-2.5-2.6b
-    → Cần ``OPENROUTER_API_KEY``
+    → Gateway OpenAI-compatible, cấu hình hoàn toàn bằng ``.env``:
+        ``OPENROUTER_API_KEY``   — khoá của gateway
+        ``OPENROUTER_BASE_URL``  — gốc API (kết thúc bằng ``/v1``)
+        ``OPENROUTER_MODEL``     — model Blue (mặc định ``ds/deepseek-flash``)
+      Model gốc của lab (``liquid/lfm-2.5-2.6b``) đã hết endpoint; xem ghi
+      chú ở khối ``DEFAULT_BLUE_MODEL`` bên dưới.
 
   Red Team (CP4)
     → Chọn một provider: OpenAI hoặc Gemini
@@ -14,6 +17,8 @@ Hai tầng model (không trộn):
     → Model khó (tuỳ chọn): ``gpt-5.6-luna`` / ``gemini-3.8-flash``
     → Bonus: chọn một — leak **Red** tối đa +5 **hoặc** leak **Red Advance** tối đa +10
     → ``RED_TEAM_PROVIDER=openai|gemini`` (alias: ``LLM_PROVIDER``)
+    → Provider openai: ``OPENAI_API_KEY`` + ``OPENAI_MODEL``
+      (và ``OPENAI_BASE_URL`` nếu đi qua gateway, không phải api.openai.com)
 """
 from __future__ import annotations
 
@@ -34,11 +39,18 @@ PROVIDER_OPENAI = "openai"
 PROVIDER_GEMINI = "gemini"
 PROVIDER_OPENROUTER = "openrouter"
 
-# --- Blue Team (LOCKED) ---
+# --- Blue Team (gateway OpenAI-compatible, khai trong .env) ---
 BLUE_PROVIDER = PROVIDER_OPENROUTER
-BLUE_MODEL = "liquid/lfm-2.5-2.6b"
+# Model gốc của lab (liquid/lfm-2.5-2.6b) đã không còn endpoint trên OpenRouter.
+# Key OpenRouter của bài là free-tier ($0 credit) nên KHÔNG gọi được model trả
+# phí. Đã được Key Coach đồng ý đổi sang gateway ai-box
+# (OPENROUTER_BASE_URL trong .env).
+# Model Blue lấy từ OPENROUTER_MODEL — đổi model chỉ cần sửa .env, không sửa
+# code. Hằng dưới đây chỉ là fallback khi .env không khai.
+DEFAULT_BLUE_MODEL = "ds/deepseek-flash"
+BLUE_MODEL = DEFAULT_BLUE_MODEL  # alias — giữ tên cũ cho code đang import
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-DEFAULT_OPENROUTER_MODEL = BLUE_MODEL  # alias
+DEFAULT_OPENROUTER_MODEL = DEFAULT_BLUE_MODEL  # alias
 
 # --- Red Team ---
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
@@ -104,8 +116,16 @@ def get_blue_provider() -> str:
 
 
 def get_blue_model() -> str:
-    # Hard-locked; env cannot override for the graded Blue Team path.
-    return BLUE_MODEL
+    """Model Blue — đọc ``OPENROUTER_MODEL`` từ .env, fallback ``DEFAULT_BLUE_MODEL``."""
+    return os.environ.get("OPENROUTER_MODEL", "").strip() or DEFAULT_BLUE_MODEL
+
+
+def get_blue_base_url() -> str:
+    """Gốc API của gateway Blue (``OPENROUTER_BASE_URL``), mặc định OpenRouter."""
+    return (
+        os.environ.get("OPENROUTER_BASE_URL", OPENROUTER_BASE_URL).strip()
+        or OPENROUTER_BASE_URL
+    )
 
 
 def get_openrouter_api_key() -> str:
@@ -113,13 +133,10 @@ def get_openrouter_api_key() -> str:
 
 
 def blue_client_kwargs() -> dict:
-    """OpenAI SDK kwargs pointing at OpenRouter (Blue Team only)."""
+    """OpenAI SDK kwargs pointing at the Blue gateway (OpenRouter / ai-box)."""
     return {
         "api_key": get_openrouter_api_key() or None,
-        "base_url": (
-            os.environ.get("OPENROUTER_BASE_URL", OPENROUTER_BASE_URL).strip()
-            or OPENROUTER_BASE_URL
-        ),
+        "base_url": get_blue_base_url(),
     }
 
 
@@ -170,7 +187,16 @@ def get_openai_api_key() -> str:
 
 
 def red_openai_client_kwargs() -> dict:
-    return {"api_key": get_openai_api_key() or None}
+    """OpenAI SDK kwargs cho Red Team.
+
+    ``OPENAI_BASE_URL`` (nếu khai trong .env) cho phép Red đi qua gateway
+    OpenAI-compatible thay vì api.openai.com. ``None`` = để SDK tự quyết
+    (đọc env rồi mới tới mặc định của OpenAI).
+    """
+    return {
+        "api_key": get_openai_api_key() or None,
+        "base_url": os.environ.get("OPENAI_BASE_URL", "").strip() or None,
+    }
 
 
 def red_provider_label(tier: str = "advance") -> str:
@@ -235,12 +261,12 @@ def is_harder_model() -> bool:
 
 
 def setup_api_key():
-    """Ensure keys for Blue (OpenRouter) + Red / Red Advance (OpenAI or Gemini)."""
+    """Ensure keys for Blue (gateway khai trong .env) + Red / Red Advance."""
     if not get_openrouter_api_key():
         os.environ["OPENROUTER_API_KEY"] = input(
-            "Enter OpenRouter API Key (Blue): "
+            "Enter API Key (Blue gateway): "
         ).strip()
-    print(f"Blue  — {blue_provider_label()}  [LOCKED]")
+    print(f"Blue  — {blue_provider_label()}  @ {get_blue_base_url()}")
 
     red = get_red_provider()
     model = get_red_model()

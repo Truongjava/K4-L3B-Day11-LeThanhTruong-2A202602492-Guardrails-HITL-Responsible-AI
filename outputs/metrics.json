@@ -1,0 +1,17 @@
+{
+  "total_requests": 34,
+  "blocked_requests": 29,
+  "block_rate": 0.8529411764705882,
+  "rate_limit_hits": 5,
+  "judge_checks": 0,
+  "judge_fails": 0,
+  "judge_fail_rate": 0.0,
+  "alerts": [
+    {
+      "metric": "block_rate",
+      "value": 0.8529411764705882,
+      "threshold": 0.5,
+      "message": "Tỉ lệ chặn 85% vượt ngưỡng 50% — kiểm tra guardrails có chặn nhầm không."
+    }
+  ]
+}
